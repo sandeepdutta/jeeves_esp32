@@ -1,0 +1,55 @@
+{
+	"name": "ESP-IDF",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	// Pre-configure ESP-IDF extension
+	"settings": {
+		"idf.showOnboardingOnInit": false,
+		"idf.toolsPath": "/opt/esp",
+		"idf.espIdfPath": "/opt/esp/idf",
+		"idf.pythonBinPath": "/opt/esp/python_env/idf5.3_py3.10_env/bin/python",
+		"idf.port": "/dev/ttyUSB0",
+		"terminal.integrated.shell.linux": "/bin/bash"
+	},
+	// Install relevant extensions in the dev container
+	"extensions": [
+		"espressif.esp-idf-extension",
+		"ms-vscode.cmake-tools",
+		"ms-vscode.cpptools"
+	],
+	"userEnvProbe": "loginInteractiveShell",
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"idf.espIdfPath": "/opt/esp/idf",
+				"idf.customExtraPaths": "",
+				"idf.pythonBinPath": "/opt/esp/python_env/idf5.3_py3.10_env/bin/python",
+				"idf.toolsPath": "/opt/esp",
+				"idf.gitPath": "/usr/bin/git"
+			},
+			"extensions": [
+				"espressif.esp-idf-extension"
+			]
+		},
+		"codespaces": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"idf.espIdfPath": "/opt/esp/idf",
+				"idf.customExtraPaths": "",
+				"idf.pythonBinPath": "/opt/esp/python_env/idf5.3_py3.10_env/bin/python",
+				"idf.toolsPath": "/opt/esp",
+				"idf.gitPath": "/usr/bin/git"
+			},
+			"extensions": [
+				"espressif.esp-idf-extension",
+				"espressif.esp-idf-web"
+			]
+		}
+	},
+	"runArgs": [
+		"--privileged"
+	]
+
+}
