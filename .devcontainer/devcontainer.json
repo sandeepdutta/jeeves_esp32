@@ -49,7 +49,10 @@
 		}
 	},
 	"runArgs": [
-		"--privileged"
+		"-it",
+		"--privileged",
+		"-p 6666:6666",
+		"-p 4444:4444"
 	]
 
 }
