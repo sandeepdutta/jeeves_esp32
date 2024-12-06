@@ -4,5 +4,14 @@
         "board/esp32s3-builtin.cfg"
     ],
     "idf.flashType": "JTAG",
-    "idf.port": "/dev/tty.usbmodem212301"
+    "idf.port": "/dev/tty.usbmodem212301",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "${env:IDF_PATH}/components/**",
+        "${env:IDF_PATH}/components/freertos/FreeRTOS-Kernel/include",
+        "${env:IDF_PATH}/components/driver/include",
+        "${env:IDF_PATH}/components/esp_system/include",
+        "${env:IDF_PATH}/components/esp_common/include",
+        "${env:IDF_PATH}/components/log/include"
+    ]
 }
