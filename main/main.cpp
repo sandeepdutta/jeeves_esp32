@@ -64,9 +64,13 @@ void hb_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 {
 	(void) last_call_time;
 	if (timer != NULL) {
-		RCSOFTCHECK(rcl_publish(&publisher, &send_msg, NULL));
-		printf("Sent: %d\n",  (int)  send_msg.data);
-		send_msg.data++;
+		if (rcl_publish(&publisher, &send_msg, NULL) == RCL_RET_OK) {
+			printf("Sent: %d\n",  (int)  send_msg.data);
+			send_msg.data++;
+		} else {
+			printf("Failed to send heartbeat: Agent mayhave disconnect restarting\n");
+			esp_restart();
+		}	
 	}
 }
 
