@@ -33,6 +33,8 @@ rcl_subscription_t subscriber;
 std_msgs__msg__Int32 send_msg;
 sensor_msgs__msg__ChannelFloat32 recv_msg;
 static led_strip_handle_t led_strip;
+static bool save_mode = false;
+
 typedef struct {
 	int red;
 	int green;
@@ -53,9 +55,7 @@ static int led_state = LED_STATE_NORMAL;
 
 static void set_leds_to_color(int red, int green, int blue) {
 	for (size_t i = 0; i < MAX_LEDS; i++) {
-		led_values[i].red = red;
-		led_values[i].green = green;
-		led_values[i].blue = blue;
+		led_strip_set_pixel(led_strip, i, red, green, blue);
 	}
 }
 
@@ -116,6 +116,13 @@ void subscription_callback(const void * msgin)
 			printf("Invalid LED state message\n");
 			return;
 		}
+		// if first led_number is -1, set all LEDs to color
+		if ((int)msg->values.data[0] == -1) {
+			set_leds_to_color(msg->values.data[1], msg->values.data[2], msg->values.data[3]);
+			led_state = LED_STATE_NORMAL;
+			led_strip_refresh(led_strip);
+			return;
+		}
 		// each LED has 4 elements led_number, red, green, blue
 		// led_number is the index of the LED
 		// red, green, blue are the color values
@@ -134,7 +141,7 @@ void subscription_callback(const void * msgin)
 		}
 		led_state = LED_STATE_NORMAL;
 		led_strip_refresh(led_strip);
-	} else if (strcmp(msg->name.data, "led_fb") == 0) { // Set front and back LEDs to color : back LED is +8 from front 
+	} else if (strcmp(msg->name.data, "led_fb") == 0 && !save_mode) { // Set front and back LEDs to color : back LED is +8 from front 
 		//value size must be divisible by 4
 		if (msg->values.size % 4 != 0) {
 			printf("Invalid LED state message\n");
@@ -159,22 +166,24 @@ void subscription_callback(const void * msgin)
 		}
 		led_state = LED_STATE_NORMAL;
 		led_strip_refresh(led_strip);
-	} else if (strcmp(msg->name.data, "led_clear") == 0) {
+	} else if (strcmp(msg->name.data, "led_clear") == 0 && !save_mode) {
 		set_leds_to_color(0, 0, 0);
 		led_strip_clear(led_strip);
 		led_state = LED_STATE_NORMAL;
 	} else if (strcmp(msg->name.data, "led_backup") == 0) {
+		save_mode = true;
 		for (size_t i = 0; i < MAX_LEDS; i++) {
 			led_values_backup[i] = led_values[i];
 		}
 	} else if (strcmp(msg->name.data, "led_restore") == 0) {	
+		save_mode = false;
 		for (size_t i = 0; i < MAX_LEDS; i++) {
 			led_values[i] = led_values_backup[i];
 			led_strip_set_pixel(led_strip, i, led_values[i].red, led_values[i].green, led_values[i].blue);
 		}
 		led_state = LED_STATE_NORMAL;
 		led_strip_refresh(led_strip);
-	} else if (strcmp(msg->name.data, "led_flash") == 0) {
+	} else if (strcmp(msg->name.data, "led_flash") == 0 && !save_mode) {
 		//value size must be divisible by 4
 		if (msg->values.size % 4 != 0) {
 			printf("Invalid LED flash message\n");
@@ -332,7 +341,7 @@ extern "C" void app_main(void)
 	led_strip_clear(led_strip);
 	// Initialize led_values to 0
 	set_leds_to_color(0, 0, 0);
-	
+	led_strip_refresh(led_strip);
     //pin micro-ros task in APP_CPU to make PRO_CPU to deal with wifi:
     xTaskCreate(micro_ros_task,
             "uros_task",
