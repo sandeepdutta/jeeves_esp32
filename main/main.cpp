@@ -279,8 +279,8 @@ extern "C" void app_main(void)
 	spi_config.flags.with_dma = true;
 	led_strip_new_spi_device(&strip_config, &spi_config, &led_strip);
 	led_strip_clear(led_strip);
-	// Initialize led_values to 0
-	set_leds_to_color(0, 0, 0);
+	// Initialize led_values to low RED
+	set_leds_to_color(20, 0, 0);
 	led_strip_refresh(led_strip);
     //pin micro-ros task in APP_CPU to make PRO_CPU to deal with wifi:
     xTaskCreate(micro_ros_task,
