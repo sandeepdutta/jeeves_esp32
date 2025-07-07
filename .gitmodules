@@ -2,3 +2,6 @@
 	path = micro_ros_espidf_component
 	url = git@github.com:sandeepdutta/micro_ros_espidf_component.git
 	branch = humble
+[submodule "m5stick/components/M5GFX"]
+	path = m5stick/components/M5GFX
+	url = https://github.com/m5stack/M5GFX
