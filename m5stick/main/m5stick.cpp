@@ -12,9 +12,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "driver/gpio.h"
-#include "driver/i2s.h"
-#include "driver/i2s_std.h"
-#include "driver/i2s_pdm.h"
+#include "M5Unified.h"
 #include "M5GFX.h"
 #include <inttypes.h>  // for PRId64
 
@@ -26,10 +24,10 @@
 #define WIFI_DISCONNECTED_BIT  BIT1
 
 static const char* TAG = "wifi_connect";
-static const char* MIC_TAG = "microphone";
 static EventGroupHandle_t wifi_event_group;
 
 M5GFX display;
+m5::Mic_Class &Mic         = M5.Mic;
 
 extern "C" void app_main();
 
@@ -155,45 +153,6 @@ void WiFiManager::init() {
 }
 
 
-bool InitI2SMicroPhone()
-{
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
-        // .sample_rate = 44100,
-        .sample_rate = 48000,
-        .bits_per_sample =
-            I2S_BITS_PER_SAMPLE_16BIT, // is fixed at 12bit, stereo, MSB
-        .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,
-#if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 1, 0)
-        .communication_format =
-            I2S_COMM_FORMAT_STAND_I2S, // Set the format of the communication.
-#else                                      // 设置通讯格式
-        .communication_format = I2S_COMM_FORMAT_I2S,
-#endif
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 2,
-        .dma_buf_len = 128,
-    };
-
-    i2s_pin_config_t pin_config;
-#if (ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 3, 0))
-    pin_config.mck_io_num = I2S_PIN_NO_CHANGE;
-#endif
-    pin_config.bck_io_num = I2S_PIN_NO_CHANGE;
-    pin_config.ws_io_num = GPIO_NUM_0;
-    pin_config.data_out_num = I2S_PIN_NO_CHANGE;
-    pin_config.data_in_num = GPIO_NUM_34;
-
-    ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL));
-    ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0, &pin_config));
-    ESP_ERROR_CHECK(i2s_set_clk(I2S_NUM_0, 48000, I2S_BITS_PER_SAMPLE_16BIT,
-                       I2S_CHANNEL_MONO));
-
-    ESP_LOGI(MIC_TAG, "I2S microphone initialized");
-    return true;
-
-}
-
 extern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
 
@@ -203,7 +162,7 @@ extern "C" void app_main() {
 
     static WiFiManager wifi;
     wifi.init();
-    InitI2SMicroPhone();
+    Mic.begin();
     xTaskCreate(&WiFiManager::connect_task, "wifi_connect_task", 4096, nullptr, 5, nullptr);
     
 }
