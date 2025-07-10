@@ -8,3 +8,7 @@
 [submodule "M5Unified"]
 	path = m5stick/M5Unified
 	url = https://github.com/m5stack/M5Unified.git
+[submodule "audio_common"]
+	path = audio_common
+	url = https://github.com/ros-drivers/audio_common.git
+	branch = ros2

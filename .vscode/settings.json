@@ -13,5 +13,7 @@
         "${env:IDF_PATH}/components/esp_system/include",
         "${env:IDF_PATH}/components/esp_common/include",
         "${env:IDF_PATH}/components/log/include"
-    ]
+    ],
+    "idf.pythonInstallPath": "/usr/bin/python3",
+    "cmake.sourceDirectory": "/home/sandeep/jeeves_esp32/m5stick"
 }
