@@ -95,7 +95,7 @@ static void flash_leds(int times, int delay_ticks, int min_led, int max_led, 	in
 void service_callback(const void * req, void * res){
 	jeeves_msgs__srv__LedSet_Response * res_out = (jeeves_msgs__srv__LedSet_Response *)res;
 	jeeves_msgs__srv__LedSet_Request * req_in = (jeeves_msgs__srv__LedSet_Request *)req;
-	printf("Received LED set request %ld %ld %ld %ld %ld\n", req_in->led_cmd, req_in->led_number, req_in->red, req_in->green, req_in->blue);
+	printf("Received LED set request %d %ld %ld %ld %ld\n", req_in->led_cmd, req_in->led_number, req_in->red, req_in->green, req_in->blue);
 	int flash_delay = req_in->flash_speed / portTICK_PERIOD_MS;
 	res_out->success = true;
 	switch (req_in->led_cmd) {

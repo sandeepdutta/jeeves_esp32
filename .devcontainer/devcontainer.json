@@ -50,6 +50,10 @@
 	},
 	"runArgs": [
 		"-it",
+		"--rm",
+		"--volume=/etc/timezone:/etc/timezone:ro",
+		"--volume=$(pwd):/micro_ros_espidf_component",
+		"--volume=/dev:/dev",
 		"--privileged",
 		"-p 6666:6666",
 		"-p 4444:4444"
