@@ -61,6 +61,10 @@ static float rms_values[max_bars] = {0};
 static int rms_index = 0;
 static constexpr const float rms_alpha = 0.1f; // Smoothing factor
 
+// Display task variables
+static bool display_ready = false;
+static float last_battery_level = -1.0f; // Track last battery level to avoid unnecessary updates
+
 // Function to calculate RMS value from audio samples
 float calculate_rms(const int16_t* samples, size_t length) {
     double sum_squares = 0.0;
@@ -73,11 +77,27 @@ float calculate_rms(const int16_t* samples, size_t length) {
 
 // Function to draw the bar graph
 void draw_bar_graph() {
-    StickCP2.Display.clear();
-    StickCP2.Display.setTextSize(1);
-    StickCP2.Display.setTextColor(WHITE);
-    StickCP2.Display.setCursor(5, 5);
-    StickCP2.Display.println("Audio RMS Level");
+    static bool first_draw = true;
+    
+    if (first_draw) {
+        // First time: clear entire screen and draw static elements
+        StickCP2.Display.fillScreen(BLACK);
+        
+        // Draw title (static)
+        StickCP2.Display.setTextSize(1);
+        StickCP2.Display.setTextColor(WHITE);
+        StickCP2.Display.setCursor(5, 5);
+        StickCP2.Display.println("Audio RMS Level");
+        
+        first_draw = false;
+    } else {
+        // Clear only the dynamic areas
+        // Clear bar area
+        StickCP2.Display.fillRect(5, bar_y_start, display_width - 10, bar_max_height, BLACK);
+        
+        // Clear RMS text area
+        StickCP2.Display.fillRect(5, display_height - 20, 100, 15, BLACK);
+    }
     
     // Draw bars
     for (int i = 0; i < max_bars; i++) {
@@ -99,36 +119,43 @@ void draw_bar_graph() {
         StickCP2.Display.fillRect(x, bar_y_start + bar_max_height - bar_height, bar_width, bar_height, color);
     }
     
-    // Draw battery level bar
+    // Draw battery level bar (only if it changed)
     float battery_level = StickCP2.Power.getBatteryLevel() / 100.0f; // Get battery level as 0.0 to 1.0
-    int battery_bar_width = 60;
-    int battery_bar_height = 8;
-    int battery_x = display_width - battery_bar_width - 5;
-    int battery_y = 5;
     
-    // Draw battery outline
-    StickCP2.Display.drawRect(battery_x, battery_y, battery_bar_width, battery_bar_height, WHITE);
-    
-    // Draw battery level fill
-    int fill_width = static_cast<int>(battery_level * (battery_bar_width - 2));
-    uint16_t battery_color;
-    if (battery_level > 0.5f) {
-        battery_color = GREEN;
-    } else if (battery_level > 0.2f) {
-        battery_color = YELLOW;
-    } else {
-        battery_color = RED;
+    if (battery_level != last_battery_level) {
+        // Clear battery area
+        int battery_bar_width = 60;
+        int battery_bar_height = 8;
+        int battery_x = display_width - battery_bar_width - 5;
+        int battery_y = 5;
+        StickCP2.Display.fillRect(battery_x, battery_y, battery_bar_width, battery_bar_height + 10, BLACK);
+        
+        // Draw battery outline
+        StickCP2.Display.drawRect(battery_x, battery_y, battery_bar_width, battery_bar_height, WHITE);
+        
+        // Draw battery level fill
+        int fill_width = static_cast<int>(battery_level * (battery_bar_width - 2));
+        uint16_t battery_color;
+        if (battery_level > 0.5f) {
+            battery_color = GREEN;
+        } else if (battery_level > 0.2f) {
+            battery_color = YELLOW;
+        } else {
+            battery_color = RED;
+        }
+        
+        if (fill_width > 0) {
+            StickCP2.Display.fillRect(battery_x + 1, battery_y + 1, fill_width, battery_bar_height - 2, battery_color);
+        }
+        
+        // Show battery percentage
+        StickCP2.Display.setTextSize(1);
+        StickCP2.Display.setTextColor(WHITE);
+        StickCP2.Display.setCursor(battery_x, battery_y + battery_bar_height + 2);
+        StickCP2.Display.printf("%.0f%%", battery_level * 100.0f);
+        
+        last_battery_level = battery_level;
     }
-    
-    if (fill_width > 0) {
-        StickCP2.Display.fillRect(battery_x + 1, battery_y + 1, fill_width, battery_bar_height - 2, battery_color);
-    }
-    
-    // Show battery percentage
-    StickCP2.Display.setTextSize(1);
-    StickCP2.Display.setTextColor(WHITE);
-    StickCP2.Display.setCursor(battery_x, battery_y + battery_bar_height + 2);
-    StickCP2.Display.printf("%.0f%%", battery_level * 100.0f);
     
     // Show current RMS value
     StickCP2.Display.setTextSize(1);
@@ -137,6 +164,25 @@ void draw_bar_graph() {
     StickCP2.Display.printf("RMS: %.1f", rms_values[rms_index]);
     
     StickCP2.Display.display();
+}
+
+void display_task(void * arg) {
+    printf("display_task created\n");
+    
+    // Wait for the display to be ready
+    while (!display_ready) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    printf("Starting display updates\n");
+    
+    while (1) {
+        // Update display continuously
+        draw_bar_graph();
+        
+        // Small delay to prevent excessive CPU usage
+        vTaskDelay(pdMS_TO_TICKS(100)); // 50 FPS
+    }
 }
 
 void mic_record(void * arg) {
@@ -162,10 +208,7 @@ void mic_record(void * arg) {
                 // Store raw RMS value without smoothing
                 rms_values[rms_index] = current_rms;
                 
-                // Update display every 10 samples for smooth animation
-                if (i % 5 == 0) {
-                    draw_bar_graph();
-                }
+                // Display updates are handled by the separate display task
                 
                 // Shift RMS values for scrolling effect
                 rms_index = (rms_index + 1) % max_bars;
@@ -330,6 +373,8 @@ extern "C" void app_main() {
     // Create the semaphore for initialization synchronization
     init_semaphore = xSemaphoreCreateBinary();
     
+
+    
     // Create the StreamBuffer for audio data transfer
     audio_stream_buffer = xStreamBufferCreate(
         stream_buffer_size,
@@ -358,6 +403,17 @@ extern "C" void app_main() {
             NULL,
             CONFIG_MICRO_ROS_APP_TASK_PRIO,
             NULL);
+            
+    // Create a task to handle display updates (lower priority)
+    xTaskCreate(display_task,
+            "display_task",
+            CONFIG_MICRO_ROS_APP_STACK,
+            NULL,
+            CONFIG_MICRO_ROS_APP_TASK_PRIO - 1, // Much lower priority than other tasks
+            NULL);
+            
+    // Signal that display is ready
+    display_ready = true;
 
     // Start the scheduler.
     vTaskStartScheduler();
