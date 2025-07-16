@@ -99,6 +99,37 @@ void draw_bar_graph() {
         StickCP2.Display.fillRect(x, bar_y_start + bar_max_height - bar_height, bar_width, bar_height, color);
     }
     
+    // Draw battery level bar
+    float battery_level = StickCP2.Power.getBatteryLevel() / 100.0f; // Get battery level as 0.0 to 1.0
+    int battery_bar_width = 60;
+    int battery_bar_height = 8;
+    int battery_x = display_width - battery_bar_width - 5;
+    int battery_y = 5;
+    
+    // Draw battery outline
+    StickCP2.Display.drawRect(battery_x, battery_y, battery_bar_width, battery_bar_height, WHITE);
+    
+    // Draw battery level fill
+    int fill_width = static_cast<int>(battery_level * (battery_bar_width - 2));
+    uint16_t battery_color;
+    if (battery_level > 0.5f) {
+        battery_color = GREEN;
+    } else if (battery_level > 0.2f) {
+        battery_color = YELLOW;
+    } else {
+        battery_color = RED;
+    }
+    
+    if (fill_width > 0) {
+        StickCP2.Display.fillRect(battery_x + 1, battery_y + 1, fill_width, battery_bar_height - 2, battery_color);
+    }
+    
+    // Show battery percentage
+    StickCP2.Display.setTextSize(1);
+    StickCP2.Display.setTextColor(WHITE);
+    StickCP2.Display.setCursor(battery_x, battery_y + battery_bar_height + 2);
+    StickCP2.Display.printf("%.0f%%", battery_level * 100.0f);
+    
     // Show current RMS value
     StickCP2.Display.setTextSize(1);
     StickCP2.Display.setTextColor(WHITE);
@@ -132,7 +163,7 @@ void mic_record(void * arg) {
                 rms_values[rms_index] = current_rms;
                 
                 // Update display every 10 samples for smooth animation
-                if (i % 10 == 0) {
+                if (i % 5 == 0) {
                     draw_bar_graph();
                 }
                 
@@ -285,7 +316,7 @@ extern "C" void app_main() {
     
     // Initialize display
     StickCP2.Display.setRotation(1); // Landscape orientation
-    StickCP2.Display.clear();
+    StickCP2.Display.fillScreen(RED); // Fill screen with red during initialization
     StickCP2.Display.setTextSize(1);
     StickCP2.Display.setTextColor(WHITE);
     StickCP2.Display.setCursor(5, 5);
