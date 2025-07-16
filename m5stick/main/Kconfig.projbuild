@@ -11,5 +11,30 @@ menu "micro-ROS application settings"
         default 5
         help
         Priority of micro-ros task higher value means higher priority
-        
+
+    config MICRO_ROS_AGENT_DISCOVER
+        bool "Discover Micros ROS Agent, used for WLAN || ETH"
+        default N
+        help
+        Discover Micro ROS Agent used only for WLAN || ETH
+
+    config BOARD_HAS_MICROPHONE
+        bool "Board has a Microphone"
+        default N
+        help
+        Select if board has a Microphone
+
+if BOARD_HAS_MICROPHONE
+    config MICROPHONE_SAMPLE_RATE
+        int "Sampling rate for Microphone if present"
+        default 44100
+        help
+        Sampling rate for Microphone if present
+
+    config MICROPHONE_SAMPLE_SIZE
+        int "Samples to be read from the Microphone if present"
+        default 512
+        help
+        Sample size for each read fom the Microphone if present
+endif
 endmenu

@@ -1,19 +1,4 @@
 {
-    "idf.adapterTargetName": "esp32s3",
-    "idf.openOcdConfigs": [
-        "board/esp32s3-builtin.cfg"
-    ],
-    "idf.flashType": "JTAG",
-    "idf.port": "/dev/tty.usbmodem212301",
-    "C_Cpp.default.includePath": [
-        "${workspaceFolder}/**",
-        "${env:IDF_PATH}/components/**",
-        "${env:IDF_PATH}/components/freertos/FreeRTOS-Kernel/include",
-        "${env:IDF_PATH}/components/driver/include",
-        "${env:IDF_PATH}/components/esp_system/include",
-        "${env:IDF_PATH}/components/esp_common/include",
-        "${env:IDF_PATH}/components/log/include"
-    ],
     "idf.pythonInstallPath": "/usr/bin/python3",
-    "cmake.sourceDirectory": "/home/sandeep/jeeves_esp32/m5stick"
+    "cmake.sourceDirectory": "/home/sandeep/jeeves_esp32/audio_common/audio_play"
 }
