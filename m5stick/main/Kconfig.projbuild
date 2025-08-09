@@ -27,7 +27,13 @@ menu "micro-ROS application settings"
 if BOARD_HAS_MICROPHONE
     config MICROPHONE_SAMPLE_RATE
         int "Sampling rate for Microphone if present"
-        default 44100
+        default 16000
+        help
+        Sampling rate for Microphone if present
+
+    config MICROPHONE_OVERSAMPLE
+        int "Over Sampling factor for Microphone if present"
+        default 2
         help
         Sampling rate for Microphone if present
 
@@ -36,5 +42,15 @@ if BOARD_HAS_MICROPHONE
         default 512
         help
         Sample size for each read fom the Microphone if present
+    config MICROPHONE_GAIN
+        int "Multiplier for Microphone samples"
+        default 32
+        help
+        Multiplier for Microphone samples
+    config MICROPHONE_AUDIO_INFO
+        bool "Publish AUDO INFO (Y/N)"
+        default N
+        help
+        Y to publish audio info topic
 endif
 endmenu

@@ -25,7 +25,9 @@
 #include <std_msgs/msg/int32.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
+#ifdef CONFIG_MICROPHONE_AUDIO_INFO
 #include <audio_common_msgs/msg/audio_info.h>
+#endif
 #include <audio_common_msgs/msg/audio_data.h>
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc);vTaskDelete(NULL);}}
@@ -36,9 +38,16 @@ extern "C" void app_main();
 static constexpr const size_t record_length     = CONFIG_MICROPHONE_SAMPLE_SIZE;
 static constexpr const size_t record_samplerate = CONFIG_MICROPHONE_SAMPLE_RATE;
 static int16_t rec_data[record_length];
-rcl_publisher_t audio_data_publisher, audio_info_publisher;
+rcl_publisher_t audio_data_publisher;
 audio_common_msgs__msg__AudioData audio_data_msg;
+#ifdef CONFIG_MICROPHONE_AUDIO_INFO
+rcl_publisher_t audio_info_publisher;
 audio_common_msgs__msg__AudioInfo audio_info_msg;
+#endif
+
+// Wake word subscriber
+rcl_subscription_t wake_word_subscriber;
+std_msgs__msg__Int32 wake_word_msg;
 
 // Create a StreamBuffer to transfer audio data between tasks
 StreamBufferHandle_t audio_stream_buffer;
@@ -64,6 +73,8 @@ static constexpr const float rms_alpha = 0.1f; // Smoothing factor
 // Display task variables
 static bool display_ready = false;
 static float last_battery_level = -1.0f; // Track last battery level to avoid unnecessary updates
+static SemaphoreHandle_t display_semaphore; // Semaphore for conditional display updates
+static SemaphoreHandle_t mic_semaphore; // Semaphore for microphone recording
 
 // Function to calculate RMS value from audio samples
 float calculate_rms(const int16_t* samples, size_t length) {
@@ -75,6 +86,44 @@ float calculate_rms(const int16_t* samples, size_t length) {
     return static_cast<float>(sqrt(sum_squares / (length)));
 }
 
+// Wake word callback function
+void wake_word_callback(const void * msgin)
+{
+    const std_msgs__msg__Int32 * msg = (const std_msgs__msg__Int32 *)msgin;
+    printf("Wake word detected: %ld\n", msg->data);
+    xSemaphoreTake(mic_semaphore, pdMS_TO_TICKS(100000));
+    while(StickCP2.Mic.isRecording()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    StickCP2.Mic.end();
+    StickCP2.Speaker.begin();
+    // Play the wake word tone
+    int tone_1 = 3000/2;
+    int tone_2 = 4000/2;
+    if (msg->data == 1) {
+        tone_1 = 3000/2;
+        tone_2 = 4000/2;
+    } else {
+        tone_1 = 4000/2;
+        tone_2 = 4000/2;
+    }
+    StickCP2.Speaker.setVolume(100);
+    StickCP2.Speaker.tone(tone_1, 150);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    StickCP2.Speaker.tone(tone_2, 150);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    StickCP2.Speaker.tone(tone_1, 150);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    while(StickCP2.Speaker.isPlaying()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    StickCP2.Speaker.end();
+    StickCP2.Mic.begin();
+    xSemaphoreGive(mic_semaphore);
+    // TODO: Add wake word handling logic here
+    // For example, start recording, change display, etc.
+}
+
 // Function to draw the bar graph
 void draw_bar_graph() {
     static bool first_draw = true;
@@ -84,17 +133,16 @@ void draw_bar_graph() {
         StickCP2.Display.fillScreen(BLACK);
         
         // Draw title (static)
-        StickCP2.Display.setTextSize(1);
+        StickCP2.Display.setTextSize(1.25f);
         StickCP2.Display.setTextColor(WHITE);
         StickCP2.Display.setCursor(5, 5);
-        StickCP2.Display.println("Audio RMS Level");
+        StickCP2.Display.println("Jeeves voice commands");
         
         first_draw = false;
     } else {
         // Clear only the dynamic areas
         // Clear bar area
         StickCP2.Display.fillRect(5, bar_y_start, display_width - 10, bar_max_height, BLACK);
-        
         // Clear RMS text area
         StickCP2.Display.fillRect(5, display_height - 20, 100, 15, BLACK);
     }
@@ -119,10 +167,10 @@ void draw_bar_graph() {
         StickCP2.Display.fillRect(x, bar_y_start + bar_max_height - bar_height, bar_width, bar_height, color);
     }
     
-    // Draw battery level bar (only if it changed)
+    // Draw battery level bar (only if it changed by more than 5%)
     float battery_level = StickCP2.Power.getBatteryLevel() / 100.0f; // Get battery level as 0.0 to 1.0
     
-    if (battery_level != last_battery_level) {
+    if (abs(battery_level - last_battery_level) > 0.05f) { // 5% threshold
         // Clear battery area
         int battery_bar_width = 60;
         int battery_bar_height = 8;
@@ -177,22 +225,37 @@ void display_task(void * arg) {
     printf("Starting display updates\n");
     
     while (1) {
-        // Update display continuously
-        draw_bar_graph();
+        // Wait for semaphore signal to update display (only when in yellow range)
+        if (xSemaphoreTake(display_semaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
+            draw_bar_graph();
+        } else {
+            // Clear bar graph area when no updates (audio too quiet)
+            StickCP2.Display.fillRect(5, bar_y_start, display_width - 10, bar_max_height, BLACK);
+            StickCP2.Display.display();
+        }
         
         // Small delay to prevent excessive CPU usage
-        vTaskDelay(pdMS_TO_TICKS(100)); // 50 FPS
+        vTaskDelay(pdMS_TO_TICKS(100)); // 10 FPS
     }
 }
 
-void mic_record(void * arg) {
+void mic_record_task(void * arg) {
     printf("mic_record task created\n");
     // Wait for the publishers to be initialized.
     xSemaphoreTake(init_semaphore, portMAX_DELAY);
     printf("Starting to record\n");
     int i = 0;
+    xSemaphoreGive(mic_semaphore);
     while (1) {
-        if (StickCP2.Mic.record(rec_data, record_length, record_samplerate)) {
+        if (xSemaphoreTake(mic_semaphore, pdMS_TO_TICKS(100)) == pdTRUE && 
+            StickCP2.Mic.record(rec_data, record_length, record_samplerate)) {
+            xSemaphoreGive(mic_semaphore);
+            // Calculate RMS value and update display
+            float current_rms = calculate_rms(rec_data, record_length);
+            // Only update bar graph if level is in yellow range (medium intensity)
+            int bar_height = static_cast<int>(current_rms * bar_max_height / 10000.0f);
+            bar_height = std::min(bar_height, bar_max_height);
+            
             // Send the audio data to the StreamBuffer
             size_t bytes_sent = xStreamBufferSend(
                 audio_stream_buffer,
@@ -202,19 +265,19 @@ void mic_record(void * arg) {
             );
             
             if (bytes_sent == record_length * sizeof(int16_t)) {
-                // Calculate RMS value and update display
-                float current_rms = calculate_rms(rec_data, record_length);
-                
                 // Store raw RMS value without smoothing
                 rms_values[rms_index] = current_rms;
                 
-                // Display updates are handled by the separate display task
+                if (bar_height >= bar_max_height / 3) {
+                    // Signal display task to update when in yellow range or higher
+                    xSemaphoreGive(display_semaphore);
+                }
                 
                 // Shift RMS values for scrolling effect
                 rms_index = (rms_index + 1) % max_bars;
                 
                 if (i % 100 == 0) {
-                    printf("Sent %d audio chunks to stream buffer\n", i++);
+                    printf("Sent %d audio chunks to stream buffer %f\n", i++, current_rms);
                 } else {
                     i++;
                 }
@@ -222,8 +285,9 @@ void mic_record(void * arg) {
                 printf("Failed to send audio data to stream buffer, sent %zu bytes\n", bytes_sent);
             }
         } else {
-            printf("Failed to record\n");
+            printf("Failed to record or semaphore not taken\n");
         }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -273,7 +337,7 @@ void micro_ros_task(void * arg)
 	RCCHECK(rclc_node_init_default(&node, "m5StickCP2_node", "", &support));
 	// Create executor.
 	rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
-	RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+	RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator)); // Increased to 3 for subscriber
 	unsigned int rcl_wait_timeout = 5000;   // in ms
 	RCCHECK(rclc_executor_set_timeout(&executor, RCL_MS_TO_NS(rcl_wait_timeout)));
 
@@ -289,6 +353,7 @@ void micro_ros_task(void * arg)
     audio_data_msg.data.capacity = record_length*sizeof(int16_t);
     audio_data_msg.data.size = 0;
 
+#ifdef CONFIG_MICROPHONE_AUDIO_INFO
     RCCHECK(rclc_publisher_init_default(
         &audio_info_publisher,
         &node,
@@ -304,7 +369,17 @@ void micro_ros_task(void * arg)
     audio_info_msg.coding_format.capacity = 4;
     audio_info_msg.coding_format.data = "PDM";
     audio_info_msg.coding_format.size = strlen("PDM");
+#endif
 
+    // Create wake word subscriber
+    RCCHECK(rclc_subscription_init_default(
+        &wake_word_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "~/wake_word"));
+
+    // Add subscriber to executor
+    RCCHECK(rclc_executor_add_subscription(&executor, &wake_word_subscriber, &wake_word_msg, &wake_word_callback, ON_NEW_DATA));
     // Signal that the publishers are initialized.
     xSemaphoreGive(init_semaphore);
     printf("micro_ros_task initialized and ready to publish audio data\n");
@@ -329,21 +404,24 @@ void micro_ros_task(void * arg)
                 printf("Failed to publish audio data: %d\n", (int)ret);
                 esp_restart();
             }
-            
+#ifdef CONFIG_MICROPHONE_AUDIO_INFO
             // Publish audio info periodically
             if (published_count % 100 == 0) {
                 RCCHECK(rcl_publish(&audio_info_publisher, &audio_info_msg, NULL));
                 printf("Published %d audio chunks\n", published_count);
             }
             published_count++;
+#endif
         }
-        
-		RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+		RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(20)));
 	}
 
 	// Free resources.
 	RCCHECK(rcl_publisher_fini(&audio_data_publisher, &node));
+#ifdef CONFIG_MICROPHONE_AUDIO_INFO
 	RCCHECK(rcl_publisher_fini(&audio_info_publisher, &node));
+#endif
+	RCCHECK(rcl_subscription_fini(&wake_word_subscriber, &node));
 	RCCHECK(rcl_node_fini(&node));
 
   	vTaskDelete(NULL);
@@ -355,8 +433,14 @@ extern "C" void app_main() {
     // Since the microphone and speaker cannot be used at the same time,
     // turn off the speaker here.
     StickCP2.Speaker.end();
+    auto mic_cfg = StickCP2.Mic.config();
+    mic_cfg.sample_rate = CONFIG_MICROPHONE_SAMPLE_RATE;
+    mic_cfg.over_sampling = CONFIG_MICROPHONE_OVERSAMPLE;
+    mic_cfg.magnification = CONFIG_MICROPHONE_GAIN;
+    StickCP2.Mic.config(mic_cfg);
     StickCP2.Mic.begin();
-    
+    printf("Mic config: sample_rate: %ld, over_sampling: %d, magnification: %d\n", 
+            mic_cfg.sample_rate, mic_cfg.over_sampling, mic_cfg.magnification);
     // Initialize display
     StickCP2.Display.setRotation(1); // Landscape orientation
     StickCP2.Display.fillScreen(RED); // Fill screen with red during initialization
@@ -373,8 +457,11 @@ extern "C" void app_main() {
     // Create the semaphore for initialization synchronization
     init_semaphore = xSemaphoreCreateBinary();
     
+    // Create the semaphore for display synchronization
+    display_semaphore = xSemaphoreCreateBinary();
 
-    
+    // Create the semaphore for microphone recording
+    mic_semaphore = xSemaphoreCreateBinary();
     // Create the StreamBuffer for audio data transfer
     audio_stream_buffer = xStreamBufferCreate(
         stream_buffer_size,
@@ -397,8 +484,8 @@ extern "C" void app_main() {
             NULL);
 
     // Create a task to record the audio on CORE 0.
-    xTaskCreate(mic_record,
-            "mic_record",
+    xTaskCreate(mic_record_task,
+            "mic_record_task",
             CONFIG_MICRO_ROS_APP_STACK,
             NULL,
             CONFIG_MICRO_ROS_APP_TASK_PRIO,
@@ -409,7 +496,7 @@ extern "C" void app_main() {
             "display_task",
             CONFIG_MICRO_ROS_APP_STACK,
             NULL,
-            CONFIG_MICRO_ROS_APP_TASK_PRIO - 1, // Much lower priority than other tasks
+            CONFIG_MICRO_ROS_APP_TASK_PRIO - 2, // Much lower priority than other tasks
             NULL);
             
     // Signal that display is ready
