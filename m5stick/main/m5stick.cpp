@@ -268,8 +268,8 @@ void mic_record_task(void * arg) {
                 // Store raw RMS value without smoothing
                 rms_values[rms_index] = current_rms;
                 
-                if (bar_height >= bar_max_height / 3) {
-                    // Signal display task to update when in yellow range or higher
+                if (bar_height >= bar_max_height / 3 || i == 0) {
+                    // Signal display task to update when in yellow range or higher or first time
                     xSemaphoreGive(display_semaphore);
                 }
                 
@@ -287,6 +287,17 @@ void mic_record_task(void * arg) {
         } else {
             printf("Failed to record or semaphore not taken\n");
         }
+        if (StickCP2.BtnA.wasClicked()) {
+            printf("Button A clicked\n");
+        }
+        if (StickCP2.BtnB.wasHold()) {
+            printf("Button B hold\n");
+            StickCP2.Display.fillScreen(BLACK);
+            StickCP2.Display.display();
+            StickCP2.Power.lightSleep(0,true);
+            esp_restart();
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -302,7 +313,7 @@ void micro_ros_task(void * arg)
 #ifdef CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE
 	rmw_init_options_t* rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
 
-#ifdef CONFIG_MICRO_ROS_ESP_NETIF_WLAN || CONFIG_MICRO_ROS_ESP_NETIF_ENET
+#if defined(CONFIG_MICRO_ROS_ESP_NETIF_WLAN) || defined(CONFIG_MICRO_ROS_ESP_NETIF_ENET)
 #ifdef CONFIG_MICRO_ROS_AGENT_DISCOVER
     // Use auto discovery.
     rcl_ret_t ret = RCL_RET_OK;
@@ -384,7 +395,7 @@ void micro_ros_task(void * arg)
     xSemaphoreGive(init_semaphore);
     printf("micro_ros_task initialized and ready to publish audio data\n");
 
-    int published_count = 0;
+    //int published_count = 0;
     while(1){
         StickCP2.update();
         
@@ -430,6 +441,7 @@ void micro_ros_task(void * arg)
 extern "C" void app_main() {
     auto cfg = M5.config();
     StickCP2.begin(cfg);
+
     // Since the microphone and speaker cannot be used at the same time,
     // turn off the speaker here.
     StickCP2.Speaker.end();
