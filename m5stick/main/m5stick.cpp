@@ -108,11 +108,11 @@ void wake_word_callback(const void * msgin)
         tone_2 = 4000/2;
     }
     StickCP2.Speaker.setVolume(100);
-    StickCP2.Speaker.tone(tone_1, 150);
+    StickCP2.Speaker.tone(tone_1, 200);
     vTaskDelay(pdMS_TO_TICKS(150));
-    StickCP2.Speaker.tone(tone_2, 150);
+    StickCP2.Speaker.tone(tone_2, 200);
     vTaskDelay(pdMS_TO_TICKS(150));
-    StickCP2.Speaker.tone(tone_1, 150);
+    StickCP2.Speaker.tone(tone_1, 200);
     vTaskDelay(pdMS_TO_TICKS(150));
     while(StickCP2.Speaker.isPlaying()) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -287,17 +287,16 @@ void mic_record_task(void * arg) {
         } else {
             printf("Failed to record or semaphore not taken\n");
         }
-        if (StickCP2.BtnA.wasClicked()) {
-            printf("Button A clicked\n");
+        if (StickCP2.BtnB.wasClicked()) {
+            printf("Button B clicked\n");
         }
-        if (StickCP2.BtnB.wasHold()) {
-            printf("Button B hold\n");
+        if (StickCP2.BtnA.wasHold()) {
+            printf("Button A hold\n");
             StickCP2.Display.fillScreen(BLACK);
             StickCP2.Display.display();
-            StickCP2.Power.lightSleep(0,true);
+            StickCP2.Power.deepSleep(0,true);
             esp_restart();
         }
-
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
