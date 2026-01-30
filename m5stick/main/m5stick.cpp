@@ -108,11 +108,11 @@ void wake_word_callback(const void * msgin)
         tone_2 = 4000/2;
     }
     StickCP2.Speaker.setVolume(100);
-    StickCP2.Speaker.tone(tone_1, 200);
+    StickCP2.Speaker.tone(tone_1, 150);
     vTaskDelay(pdMS_TO_TICKS(150));
-    StickCP2.Speaker.tone(tone_2, 200);
+    StickCP2.Speaker.tone(tone_2, 150);
     vTaskDelay(pdMS_TO_TICKS(150));
-    StickCP2.Speaker.tone(tone_1, 200);
+    StickCP2.Speaker.tone(tone_1, 150);
     vTaskDelay(pdMS_TO_TICKS(150));
     while(StickCP2.Speaker.isPlaying()) {
         vTaskDelay(pdMS_TO_TICKS(10));
