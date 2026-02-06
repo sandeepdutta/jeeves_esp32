@@ -16,38 +16,31 @@
 #include "driver/gpio.h"
 #include "M5StickCPlus2.h"
 #include <inttypes.h>  // for PRId64
-#include <micro_ros_utilities/type_utilities.h>
-#include <micro_ros_utilities/string_utilities.h>
-#include <rmw_microros/rmw_microros.h>
-#include <uros_network_interfaces.h>
-#include <rcl/rcl.h>
-#include <rcl/error_handling.h>
-#include <std_msgs/msg/int32.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#ifdef CONFIG_MICROPHONE_AUDIO_INFO
-#include <audio_common_msgs/msg/audio_info.h>
-#endif
-#include <audio_common_msgs/msg/audio_data.h>
-
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc);vTaskDelete(NULL);}}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "lwip/sys.h"
+#include <lwip/netdb.h>
+#include "esp_wifi.h"
+#include "esp_system.h"
+#include <fcntl.h>
+#include <errno.h>
 
 extern "C" void app_main();
 
 static constexpr const size_t record_length     = CONFIG_MICROPHONE_SAMPLE_SIZE;
 static constexpr const size_t record_samplerate = CONFIG_MICROPHONE_SAMPLE_RATE;
 static int16_t rec_data[record_length];
-rcl_publisher_t audio_data_publisher;
-audio_common_msgs__msg__AudioData audio_data_msg;
-#ifdef CONFIG_MICROPHONE_AUDIO_INFO
-rcl_publisher_t audio_info_publisher;
-audio_common_msgs__msg__AudioInfo audio_info_msg;
-#endif
 
-// Wake word subscriber
-rcl_subscription_t wake_word_subscriber;
-std_msgs__msg__Int32 wake_word_msg;
+// TCP socket handle
+static int tcp_sock = -1;
+static SemaphoreHandle_t socket_mutex;
+
+// WiFi connection tracking
+static EventGroupHandle_t wifi_event_group;
+static const int WIFI_CONNECTED_BIT = BIT0;
+static const int WIFI_FAIL_BIT = BIT1;
+static int wifi_retry_count = 0;
+static const int WIFI_MAX_RETRY = 5;
 
 // Create a StreamBuffer to transfer audio data between tasks
 StreamBufferHandle_t audio_stream_buffer;
@@ -86,12 +79,35 @@ float calculate_rms(const int16_t* samples, size_t length) {
     return static_cast<float>(sqrt(sum_squares / (length)));
 }
 
-// Wake word callback function
-void wake_word_callback(const void * msgin)
+// WiFi event handler
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
 {
-    const std_msgs__msg__Int32 * msg = (const std_msgs__msg__Int32 *)msgin;
-    printf("Wake word detected: %ld\n", msg->data);
-    xSemaphoreTake(mic_semaphore, pdMS_TO_TICKS(100000));
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+        printf("WiFi started, attempting to connect...\n");
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (wifi_retry_count < WIFI_MAX_RETRY) {
+            esp_wifi_connect();
+            wifi_retry_count++;
+            printf("Retry connecting to WiFi... (attempt %d/%d)\n", wifi_retry_count, WIFI_MAX_RETRY);
+        } else {
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+            printf("Failed to connect to WiFi after %d attempts\n", WIFI_MAX_RETRY);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        printf("Got IP address: " IPSTR "\n", IP2STR(&event->ip_info.ip));
+        wifi_retry_count = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+// Wake word handling function
+void handle_wake_word(int32_t wake_word_value)
+{
+    printf("Wake word detected: %ld\n", wake_word_value);
+    xSemaphoreTake(mic_semaphore, portMAX_DELAY);
     while(StickCP2.Mic.isRecording()) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -100,7 +116,7 @@ void wake_word_callback(const void * msgin)
     // Play the wake word tone
     int tone_1 = 3000/2;
     int tone_2 = 4000/2;
-    if (msg->data == 1) {
+    if (wake_word_value == 1) {
         tone_1 = 3000/2;
         tone_2 = 4000/2;
     } else {
@@ -120,8 +136,6 @@ void wake_word_callback(const void * msgin)
     StickCP2.Speaker.end();
     StickCP2.Mic.begin();
     xSemaphoreGive(mic_semaphore);
-    // TODO: Add wake word handling logic here
-    // For example, start recording, change display, etc.
 }
 
 // Function to draw the bar graph
@@ -247,7 +261,7 @@ void mic_record_task(void * arg) {
     int i = 0;
     xSemaphoreGive(mic_semaphore);
     while (1) {
-        if (xSemaphoreTake(mic_semaphore, pdMS_TO_TICKS(100)) == pdTRUE && 
+        if (xSemaphoreTake(mic_semaphore, portMAX_DELAY) == pdTRUE && 
             StickCP2.Mic.record(rec_data, record_length, record_samplerate)) {
             xSemaphoreGive(mic_semaphore);
             // Calculate RMS value and update display
@@ -261,7 +275,7 @@ void mic_record_task(void * arg) {
                 audio_stream_buffer,
                 rec_data,
                 record_length * sizeof(int16_t),
-                pdMS_TO_TICKS(100) // 100ms timeout
+                portMAX_DELAY
             );
             
             if (bytes_sent == record_length * sizeof(int16_t)) {
@@ -301,140 +315,113 @@ void mic_record_task(void * arg) {
     }
 }
 
-void micro_ros_task(void * arg)
+// TCP/IP communication task
+void tcp_comm_task(void * arg)
 {
-	rcl_allocator_t allocator = rcl_get_default_allocator();
-	rclc_support_t support;
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = inet_addr(CONFIG_SERVER_IP);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(CONFIG_SERVER_PORT);
 
-	rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-	RCCHECK(rcl_init_options_init(&init_options, allocator));
+    uint8_t* audio_buffer = (uint8_t*)malloc(record_length * sizeof(int16_t));
+    if (audio_buffer == NULL) {
+        printf("Failed to allocate audio buffer\n");
+        vTaskDelete(NULL);
+        return;
+    }
 
-#ifdef CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE
-	rmw_init_options_t* rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
+    int published_count = 0;
 
-#if defined(CONFIG_MICRO_ROS_ESP_NETIF_WLAN) || defined(CONFIG_MICRO_ROS_ESP_NETIF_ENET)
-#ifdef CONFIG_MICRO_ROS_AGENT_DISCOVER
-    // Use auto discovery.
-    rcl_ret_t ret = RCL_RET_OK;
-    do {
-        ret = rmw_uros_discover_agent(rmw_options);
-        if (ret != RCL_RET_OK) {
-            printf("Failed to discover agent: %d\n", (int)ret);
-            usleep(1000);
+    while(1) {
+        // Try to connect to the server
+        tcp_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+        if (tcp_sock < 0) {
+            printf("Unable to create socket: errno %d\n", errno);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-    } while (ret != RCL_RET_OK);
-    printf("Agent discovered\n");
-#else
-	// Use Static Agent IP and port.
-    RCCHECK(rmw_uros_options_set_udp_address(CONFIG_MICRO_ROS_AGENT_IP, CONFIG_MICRO_ROS_AGENT_PORT, rmw_options));
-    printf("Agent IP and port set\n");
-#endif
-#endif
-#endif
-    // create init_options
-	while (1) {
-		rcl_ret_t ret = (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator));
-		if (ret == RCL_RET_OK) {
-			printf("support initialized\n");
-			break;
-		} else {
-			printf("Failed to initialize support: %d : retrying...\n", (int)ret);
-		}
-	}
 
-	// create node
-	rcl_node_t node = rcl_get_zero_initialized_node();
-	RCCHECK(rclc_node_init_default(&node, "m5StickCP2_node", "", &support));
-	// Create executor.
-	rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
-	RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator)); // Increased to 3 for subscriber
-	unsigned int rcl_wait_timeout = 5000;   // in ms
-	RCCHECK(rclc_executor_set_timeout(&executor, RCL_MS_TO_NS(rcl_wait_timeout)));
+        printf("Socket created, connecting to %s:%d\n", CONFIG_SERVER_IP, CONFIG_SERVER_PORT);
 
-    // Create publishers
-    RCCHECK(rclc_publisher_init_default(
-        &audio_data_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(audio_common_msgs, msg, AudioData),
-        "~/audio_data"));
-    // allocate memory for the message. 
-    // Details: https://micro.ros.org/docs/tutorials/advanced/handling_type_memory/
-    audio_data_msg.data.data = (uint8_t*)malloc(record_length * sizeof(int16_t));
-    audio_data_msg.data.capacity = record_length*sizeof(int16_t);
-    audio_data_msg.data.size = 0;
-
-#ifdef CONFIG_MICROPHONE_AUDIO_INFO
-    RCCHECK(rclc_publisher_init_default(
-        &audio_info_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(audio_common_msgs, msg, AudioInfo),
-        "~/audio_info"));
-
-    // Initialize the message.
-    audio_info_msg.sample_rate = record_samplerate;
-    audio_info_msg.channels = 1;
-    audio_info_msg.sample_format.capacity = 4;
-    audio_info_msg.sample_format.data = "PDM";
-    audio_info_msg.sample_format.size = strlen("PDM");
-    audio_info_msg.coding_format.capacity = 4;
-    audio_info_msg.coding_format.data = "PDM";
-    audio_info_msg.coding_format.size = strlen("PDM");
-#endif
-
-    // Create wake word subscriber
-    RCCHECK(rclc_subscription_init_default(
-        &wake_word_subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "~/wake_word"));
-
-    // Add subscriber to executor
-    RCCHECK(rclc_executor_add_subscription(&executor, &wake_word_subscriber, &wake_word_msg, &wake_word_callback, ON_NEW_DATA));
-    // Signal that the publishers are initialized.
-    xSemaphoreGive(init_semaphore);
-    printf("micro_ros_task initialized and ready to publish audio data\n");
-
-    //int published_count = 0;
-    while(1){
-        StickCP2.update();
-        
-        // Try to receive audio data from the StreamBuffer
-        size_t bytes_received = xStreamBufferReceive(
-            audio_stream_buffer,
-            audio_data_msg.data.data,
-            record_length * sizeof(int16_t),
-            pdMS_TO_TICKS(10) // 10ms timeout - non-blocking
-        );
-        
-        if (bytes_received == record_length * sizeof(int16_t)) {
-            // Publish the audio data
-            audio_data_msg.data.size = bytes_received;
-            auto ret = rcl_publish(&audio_data_publisher, &audio_data_msg, NULL);
-            if (ret != RCL_RET_OK) {
-                printf("Failed to publish audio data: %d\n", (int)ret);
-                esp_restart();
-            }
-#ifdef CONFIG_MICROPHONE_AUDIO_INFO
-            // Publish audio info periodically
-            if (published_count % 100 == 0) {
-                RCCHECK(rcl_publish(&audio_info_publisher, &audio_info_msg, NULL));
-                printf("Published %d audio chunks\n", published_count);
-            }
-            published_count++;
-#endif
+        int err = connect(tcp_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (err != 0) {
+            printf("Socket unable to connect: errno %d\n", errno);
+            close(tcp_sock);
+            tcp_sock = -1;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-		RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(20)));
-	}
+        printf("Successfully connected\n");
 
-	// Free resources.
-	RCCHECK(rcl_publisher_fini(&audio_data_publisher, &node));
-#ifdef CONFIG_MICROPHONE_AUDIO_INFO
-	RCCHECK(rcl_publisher_fini(&audio_info_publisher, &node));
-#endif
-	RCCHECK(rcl_subscription_fini(&wake_word_subscriber, &node));
-	RCCHECK(rcl_node_fini(&node));
+        // Set socket to non-blocking mode for receiving
+        int flags = fcntl(tcp_sock, F_GETFL, 0);
+        fcntl(tcp_sock, F_SETFL, flags | O_NONBLOCK);
 
-  	vTaskDelete(NULL);
+        // Signal that the connection is initialized
+        xSemaphoreGive(init_semaphore);
+        printf("TCP connection initialized and ready to send/receive data\n");
+
+        // Main communication loop
+        while(1) {
+            StickCP2.update();
+
+            // Try to receive audio data from the StreamBuffer
+            size_t bytes_received = xStreamBufferReceive(
+                audio_stream_buffer,
+                audio_buffer,
+                record_length * sizeof(int16_t),
+                pdMS_TO_TICKS(10) // 10ms timeout - non-blocking
+            );
+
+            if (bytes_received == record_length * sizeof(int16_t)) {
+                // Send the audio data over TCP
+                xSemaphoreTake(socket_mutex, portMAX_DELAY);
+                int sent = send(tcp_sock, audio_buffer, bytes_received, 0);
+                xSemaphoreGive(socket_mutex);
+
+                if (sent < 0) {
+                    printf("Error occurred during sending: errno %d\n", errno);
+                    break; // Break to reconnect
+                }
+
+                if (published_count % 100 == 0) {
+                    printf("Sent %d audio chunks\n", published_count);
+                }
+                published_count++;
+            }
+
+            // Try to receive wake word data (non-blocking)
+            int32_t wake_word_value;
+            xSemaphoreTake(socket_mutex, portMAX_DELAY);
+            int len = recv(tcp_sock, &wake_word_value, sizeof(int32_t), 0);
+            xSemaphoreGive(socket_mutex);
+
+            if (len > 0) {
+                printf("Received wake word data: %ld\n", wake_word_value);
+                handle_wake_word(wake_word_value);
+            } else if (len == 0) {
+                printf("Connection closed by server\n");
+                break; // Break to reconnect
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                printf("Error occurred during receiving: errno %d\n", errno);
+                break; // Break to reconnect
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        // Close the socket and reconnect
+        printf("Closing socket and reconnecting...\n");
+        if (tcp_sock >= 0) {
+            shutdown(tcp_sock, SHUT_RDWR);
+            close(tcp_sock);
+            tcp_sock = -1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    free(audio_buffer);
+    vTaskDelete(NULL);
 }
 
 extern "C" void app_main() {
@@ -461,34 +448,92 @@ extern "C" void app_main() {
     StickCP2.Display.println("Initializing Audio RMS Display...");
     StickCP2.Display.display();
 
-#if defined(CONFIG_MICRO_ROS_ESP_NETIF_WLAN) || defined(CONFIG_MICRO_ROS_ESP_NETIF_ENET)
-    ESP_ERROR_CHECK(uros_network_interface_initialize());
-#endif
-    
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Create WiFi event group
+    wifi_event_group = xEventGroupCreate();
+
+    // Initialize network interface
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Initialize WiFi
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    wifi_config_t wifi_config = {};
+    strcpy((char*)wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID);
+    strcpy((char*)wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD);
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    printf("WiFi initialization complete. Connecting to %s...\n", CONFIG_ESP_WIFI_SSID);
+
+    // Wait for connection (with timeout)
+    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        printf("Connected to WiFi SSID: %s\n", CONFIG_ESP_WIFI_SSID);
+    } else if (bits & WIFI_FAIL_BIT) {
+        printf("Failed to connect to WiFi SSID: %s after %d retries\n", CONFIG_ESP_WIFI_SSID, WIFI_MAX_RETRY);
+    } else {
+        printf("Unexpected WiFi connection event\n");
+    }
+
     // Create the semaphore for initialization synchronization
     init_semaphore = xSemaphoreCreateBinary();
-    
+
     // Create the semaphore for display synchronization
     display_semaphore = xSemaphoreCreateBinary();
 
     // Create the semaphore for microphone recording
     mic_semaphore = xSemaphoreCreateBinary();
+
+    // Create the mutex for socket access
+    socket_mutex = xSemaphoreCreateMutex();
+
     // Create the StreamBuffer for audio data transfer
     audio_stream_buffer = xStreamBufferCreate(
         stream_buffer_size,
         record_length * sizeof(int16_t) // Trigger level - one complete audio chunk
     );
-    
+
     if (audio_stream_buffer == NULL) {
         printf("Failed to create audio stream buffer\n");
         esp_restart();
     }
-    
+
     printf("Audio stream buffer created with size %zu bytes\n", stream_buffer_size);
-    
-    //pin micro-ros task in APP_CPU to make PRO_CPU to deal with wifi:
-    xTaskCreate(micro_ros_task,
-            "uros_task",
+
+    // Create TCP communication task
+    xTaskCreate(tcp_comm_task,
+            "tcp_comm_task",
             CONFIG_MICRO_ROS_APP_STACK,
             NULL,
             CONFIG_MICRO_ROS_APP_TASK_PRIO,

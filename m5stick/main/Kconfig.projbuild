@@ -12,18 +12,28 @@ menu "micro-ROS application settings"
         help
         Priority of micro-ros task higher value means higher priority
 
-    config MICRO_ROS_AGENT_DISCOVER
-        bool "Discover Micros ROS Agent, used for WLAN || ETH"
-        default N
-        help
-        Discover Micro ROS Agent used only for WLAN || ETH
-
     config BOARD_HAS_MICROPHONE
         bool "Board has a Microphone"
-        default N
+        default Y
         help
         Select if board has a Microphone
 
+    config SERVER_IP
+        string "Server IP Address"
+        default "192.168.0.237"
+
+    config SERVER_PORT
+        int "Server port number"
+        default 8888
+
+    config ESP_WIFI_SSID
+        string "Wifi SSID to connect to"
+        default ""
+
+    config ESP_WIFI_PASSWORD
+        string "Wifi Password"
+        default ""
+        
 if BOARD_HAS_MICROPHONE
     config MICROPHONE_SAMPLE_RATE
         int "Sampling rate for Microphone if present"

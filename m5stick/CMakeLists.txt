@@ -4,6 +4,6 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS components/M5GFX M5Unified ./micro_ros_espidf_component)
+set(EXTRA_COMPONENT_DIRS components/M5GFX M5Unified )
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5stick)
