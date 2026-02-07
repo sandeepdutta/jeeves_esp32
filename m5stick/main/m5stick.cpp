@@ -31,6 +31,15 @@ static constexpr const size_t record_length     = CONFIG_MICROPHONE_SAMPLE_SIZE;
 static constexpr const size_t record_samplerate = CONFIG_MICROPHONE_SAMPLE_RATE;
 static int16_t rec_data[record_length];
 
+// Noise threshold for transmission
+#ifndef CONFIG_AUDIO_NOISE_THRESHOLD
+#define CONFIG_AUDIO_NOISE_THRESHOLD 500.0f
+#endif
+static constexpr const float noise_threshold = CONFIG_AUDIO_NOISE_THRESHOLD;
+static bool is_transmitting = false;
+static TickType_t transmission_start_time = 0;
+static constexpr const TickType_t min_transmission_duration = pdMS_TO_TICKS(2000); // 2 seconds
+
 // TCP socket handle
 static int tcp_sock = -1;
 static SemaphoreHandle_t socket_mutex;
@@ -66,6 +75,7 @@ static constexpr const float rms_alpha = 0.1f; // Smoothing factor
 // Display task variables
 static bool display_ready = false;
 static float last_battery_level = -1.0f; // Track last battery level to avoid unnecessary updates
+static int8_t wifi_rssi = -100; // WiFi signal strength in dBm
 static SemaphoreHandle_t display_semaphore; // Semaphore for conditional display updates
 static SemaphoreHandle_t mic_semaphore; // Semaphore for microphone recording
 
@@ -77,6 +87,46 @@ float calculate_rms(const int16_t* samples, size_t length) {
         sum_squares += sample * sample;
     }
     return static_cast<float>(sqrt(sum_squares / (length)));
+}
+
+// μ-law encoding (G.711) - converts 16-bit PCM to 8-bit μ-law
+// Reduces bandwidth by 50% with good voice quality
+uint8_t encode_mulaw(int16_t sample) {
+    const int16_t MULAW_MAX = 0x1FFF;  // Maximum value for μ-law
+    const int16_t MULAW_BIAS = 0x84;    // Bias value
+
+    // Get sign and magnitude
+    int sign = (sample >> 8) & 0x80;
+    if (sign) {
+        sample = -sample;
+    }
+
+    // Clip the magnitude
+    if (sample > MULAW_MAX) {
+        sample = MULAW_MAX;
+    }
+
+    // Add bias
+    sample = sample + MULAW_BIAS;
+
+    // Find segment
+    int exponent = 7;
+    for (int exp_mask = 0x4000; (sample & exp_mask) == 0 && exponent > 0; exponent--, exp_mask >>= 1);
+
+    // Calculate mantissa
+    int mantissa = (sample >> (exponent + 3)) & 0x0F;
+
+    // Combine and invert
+    uint8_t mulaw = ~(sign | (exponent << 4) | mantissa);
+
+    return mulaw;
+}
+
+// Encode an array of PCM samples to μ-law
+void encode_mulaw_buffer(const int16_t* pcm_samples, uint8_t* mulaw_samples, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        mulaw_samples[i] = encode_mulaw(pcm_samples[i]);
+    }
 }
 
 // WiFi event handler
@@ -157,8 +207,8 @@ void draw_bar_graph() {
         // Clear only the dynamic areas
         // Clear bar area
         StickCP2.Display.fillRect(5, bar_y_start, display_width - 10, bar_max_height, BLACK);
-        // Clear RMS text area
-        StickCP2.Display.fillRect(5, display_height - 20, 100, 15, BLACK);
+        // Clear RMS and WiFi text area (bottom line)
+        StickCP2.Display.fillRect(5, display_height - 20, display_width - 10, 15, BLACK);
     }
     
     // Draw bars
@@ -224,7 +274,29 @@ void draw_bar_graph() {
     StickCP2.Display.setTextColor(WHITE);
     StickCP2.Display.setCursor(5, display_height - 10);
     StickCP2.Display.printf("RMS: %.1f", rms_values[rms_index]);
-    
+
+    // Get and display WiFi signal strength
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        wifi_rssi = ap_info.rssi;
+
+        // Display WiFi signal with color coding
+        uint16_t wifi_color;
+        if (wifi_rssi > -50) {
+            wifi_color = GREEN;  // Excellent
+        } else if (wifi_rssi > -60) {
+            wifi_color = YELLOW; // Very Good
+        } else if (wifi_rssi > -70) {
+            wifi_color = YELLOW; // Good
+        } else {
+            wifi_color = RED;    // Fair/Poor
+        }
+
+        StickCP2.Display.setTextColor(wifi_color);
+        StickCP2.Display.setCursor(display_width - 80, display_height - 10);
+        StickCP2.Display.printf("WiFi:%ddBm", wifi_rssi);
+    }
+
     StickCP2.Display.display();
 }
 
@@ -264,39 +336,92 @@ void mic_record_task(void * arg) {
         if (xSemaphoreTake(mic_semaphore, portMAX_DELAY) == pdTRUE && 
             StickCP2.Mic.record(rec_data, record_length, record_samplerate)) {
             xSemaphoreGive(mic_semaphore);
-            // Calculate RMS value and update display
+            // Calculate RMS value
             float current_rms = calculate_rms(rec_data, record_length);
-            // Only update bar graph if level is in yellow range (medium intensity)
             int bar_height = static_cast<int>(current_rms * bar_max_height / 10000.0f);
             bar_height = std::min(bar_height, bar_max_height);
-            
-            // Send the audio data to the StreamBuffer
-            size_t bytes_sent = xStreamBufferSend(
-                audio_stream_buffer,
-                rec_data,
-                record_length * sizeof(int16_t),
-                portMAX_DELAY
-            );
-            
-            if (bytes_sent == record_length * sizeof(int16_t)) {
-                // Store raw RMS value without smoothing
+
+            // Check if audio level exceeds threshold for transmission
+            // If threshold is 0, always transmit
+            bool above_threshold = (noise_threshold == 0.0f) || (current_rms > noise_threshold);
+
+            // Determine if we should transmit
+            bool should_transmit = false;
+
+            if (above_threshold) {
+                // Start transmission if not already transmitting
+                if (!is_transmitting && noise_threshold > 0.0f) {
+                    printf("Audio level above threshold (%.1f > %.1f) - starting transmission\n",
+                           current_rms, noise_threshold);
+                    transmission_start_time = xTaskGetTickCount();
+                    is_transmitting = true;
+                } else if (!is_transmitting && noise_threshold == 0.0f) {
+                    // Threshold disabled, always transmit
+                    is_transmitting = true;
+                }
+                should_transmit = true;
+            } else if (is_transmitting) {
+                // Audio is below threshold, but check minimum duration
+                TickType_t current_time = xTaskGetTickCount();
+                TickType_t elapsed_time = current_time - transmission_start_time;
+
+                if (elapsed_time < min_transmission_duration) {
+                    // Continue transmitting for minimum duration
+                    should_transmit = true;
+                    if (i % 50 == 0) {
+                        TickType_t remaining = min_transmission_duration - elapsed_time;
+                        printf("Below threshold but maintaining transmission (%ld ms remaining)\n",
+                               pdTICKS_TO_MS(remaining));
+                    }
+                } else {
+                    // Minimum duration elapsed, stop transmission
+                    printf("Audio level below threshold (%.1f < %.1f) - stopping transmission after %.1f seconds\n",
+                           current_rms, noise_threshold, pdTICKS_TO_MS(elapsed_time) / 1000.0f);
+                    is_transmitting = false;
+                    should_transmit = false;
+                    // Clear the display when transmission stops
+                    for (int j = 0; j < max_bars; j++) {
+                        rms_values[j] = 0;
+                    }
+                    xSemaphoreGive(display_semaphore);
+                }
+            }
+
+            if (should_transmit) {
+                // Update display only when transmitting
                 rms_values[rms_index] = current_rms;
-                
+
                 if (bar_height >= bar_max_height / 3 || i == 0) {
                     // Signal display task to update when in yellow range or higher or first time
                     xSemaphoreGive(display_semaphore);
                 }
-                
+
                 // Shift RMS values for scrolling effect
                 rms_index = (rms_index + 1) % max_bars;
-                
-                if (i % 100 == 0) {
-                    printf("Sent %d audio chunks to stream buffer %f\n", i++, current_rms);
+
+                // Send the audio data to the StreamBuffer
+                size_t bytes_sent = xStreamBufferSend(
+                    audio_stream_buffer,
+                    rec_data,
+                    record_length * sizeof(int16_t),
+                    portMAX_DELAY
+                );
+
+                if (bytes_sent == record_length * sizeof(int16_t)) {
+                    if (i % 100 == 0) {
+                        printf("Sent %d audio chunks to stream buffer, RMS: %.1f\n", i++, current_rms);
+                    } else {
+                        i++;
+                    }
                 } else {
-                    i++;
+                    printf("Failed to send audio data to stream buffer, sent %zu bytes\n", bytes_sent);
                 }
             } else {
-                printf("Failed to send audio data to stream buffer, sent %zu bytes\n", bytes_sent);
+                // Not transmitting
+                if (i % 100 == 0) {
+                    printf("Audio below threshold, not transmitting. RMS: %.1f\n", current_rms);
+                }
+                i++;
             }
         } else {
             printf("Failed to record or semaphore not taken\n");
@@ -323,12 +448,24 @@ void tcp_comm_task(void * arg)
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(CONFIG_SERVER_PORT);
 
+    // Buffer for receiving PCM audio from stream buffer
     uint8_t* audio_buffer = (uint8_t*)malloc(record_length * sizeof(int16_t));
     if (audio_buffer == NULL) {
         printf("Failed to allocate audio buffer\n");
         vTaskDelete(NULL);
         return;
     }
+
+    // Buffer for μ-law encoded audio (half the size of PCM)
+    uint8_t* mulaw_buffer = (uint8_t*)malloc(record_length);
+    if (mulaw_buffer == NULL) {
+        printf("Failed to allocate mulaw buffer\n");
+        free(audio_buffer);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    printf("Using μ-law encoding (50%% bandwidth reduction)\n");
 
     int published_count = 0;
 
@@ -374,9 +511,12 @@ void tcp_comm_task(void * arg)
             );
 
             if (bytes_received == record_length * sizeof(int16_t)) {
-                // Send the audio data over TCP
+                // Encode PCM to μ-law (16-bit to 8-bit compression)
+                encode_mulaw_buffer((int16_t*)audio_buffer, mulaw_buffer, record_length);
+
+                // Send the μ-law encoded audio data over TCP (half the size)
                 xSemaphoreTake(socket_mutex, portMAX_DELAY);
-                int sent = send(tcp_sock, audio_buffer, bytes_received, 0);
+                int sent = send(tcp_sock, mulaw_buffer, record_length, 0);
                 xSemaphoreGive(socket_mutex);
 
                 if (sent < 0) {
@@ -385,7 +525,8 @@ void tcp_comm_task(void * arg)
                 }
 
                 if (published_count % 100 == 0) {
-                    printf("Sent %d audio chunks\n", published_count);
+                    printf("Sent %d audio chunks (%d bytes μ-law encoded)\n",
+                           published_count, (int)record_length);
                 }
                 published_count++;
             }
@@ -410,17 +551,19 @@ void tcp_comm_task(void * arg)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // Close the socket and reconnect
-        printf("Closing socket and reconnecting...\n");
+        // Connection lost - close socket and restart ESP32
+        printf("Connection lost. Closing socket and restarting ESP32...\n");
         if (tcp_sock >= 0) {
             shutdown(tcp_sock, SHUT_RDWR);
             close(tcp_sock);
             tcp_sock = -1;
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
     }
 
     free(audio_buffer);
+    free(mulaw_buffer);
     vTaskDelete(NULL);
 }
 
@@ -437,8 +580,14 @@ extern "C" void app_main() {
     mic_cfg.magnification = CONFIG_MICROPHONE_GAIN;
     StickCP2.Mic.config(mic_cfg);
     StickCP2.Mic.begin();
-    printf("Mic config: sample_rate: %ld, over_sampling: %d, magnification: %d\n", 
+    printf("Mic config: sample_rate: %ld, over_sampling: %d, magnification: %d\n",
             mic_cfg.sample_rate, mic_cfg.over_sampling, mic_cfg.magnification);
+    if (noise_threshold > 0.0f) {
+        printf("Audio noise threshold: %.1f (only transmit when RMS > %.1f)\n",
+                noise_threshold, noise_threshold);
+    } else {
+        printf("Audio noise threshold: disabled (always transmit)\n");
+    }
     // Initialize display
     StickCP2.Display.setRotation(1); // Landscape orientation
     StickCP2.Display.fillScreen(RED); // Fill screen with red during initialization
@@ -487,10 +636,11 @@ extern "C" void app_main() {
     strcpy((char*)wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    
+    printf("Starting Wifi ...\n");
     ESP_ERROR_CHECK(esp_wifi_start());
 
     printf("WiFi initialization complete. Connecting to %s...\n", CONFIG_ESP_WIFI_SSID);
-
     // Wait for connection (with timeout)
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
@@ -502,6 +652,7 @@ extern "C" void app_main() {
         printf("Connected to WiFi SSID: %s\n", CONFIG_ESP_WIFI_SSID);
     } else if (bits & WIFI_FAIL_BIT) {
         printf("Failed to connect to WiFi SSID: %s after %d retries\n", CONFIG_ESP_WIFI_SSID, WIFI_MAX_RETRY);
+        esp_restart();
     } else {
         printf("Unexpected WiFi connection event\n");
     }

@@ -33,7 +33,7 @@ menu "micro-ROS application settings"
     config ESP_WIFI_PASSWORD
         string "Wifi Password"
         default ""
-        
+
 if BOARD_HAS_MICROPHONE
     config MICROPHONE_SAMPLE_RATE
         int "Sampling rate for Microphone if present"
@@ -62,5 +62,14 @@ if BOARD_HAS_MICROPHONE
         default N
         help
         Y to publish audio info topic
+    config AUDIO_NOISE_THRESHOLD
+        int "Audio RMS threshold for transmission (0-10000)"
+        default 500
+        help
+        Only transmit audio when RMS level exceeds this threshold.
+        Lower values = more sensitive (transmit more often)
+        Higher values = less sensitive (only transmit louder sounds)
+        Set to 0 to always transmit.
+        Typical values: 300-1000 for voice activation
 endif
 endmenu
